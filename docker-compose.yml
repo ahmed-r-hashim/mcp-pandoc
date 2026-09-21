@@ -1,0 +1,11 @@
+services:
+  pandoc-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - 8055:8055
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env # Load environment variables from .env file

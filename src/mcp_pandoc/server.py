@@ -4,9 +4,16 @@ import os
 import mcp.server.stdio
 import mcp.types as types
 import pypandoc
+import uvicorn
 import yaml
 from jsonschema import ValidationError, validate
 from mcp.server import Server, ServerRequestContext
+from mcp.server.sse import SseServerTransport
+from starlette.applications import Starlette
+from starlette.responses import Response
+from starlette.routing import Mount, Route
+
+from .config import logger, settings
 
 # Pandoc reads and writes different sets of formats, so these two lists are deliberately
 # separate and must not be collapsed back into one. Only add a format to the direction
@@ -56,12 +63,12 @@ async def handle_list_tools() -> list[types.Tool]:
                 "     - Complete directory path\n"
                 "     - Filename\n"
                 "     - File extension\n"
-                "   * Example request: 'Write a story and save as PDF'\n"
-                "   * You MUST specify: '/path/to/story.pdf' or 'C:\\Documents\\story.pdf'\n"
+                "   * Example request: `Write a story and save as PDF`\n"
+                "   * You MUST specify: `/path/to/story.pdf` or `C:\\Documents\\story.pdf`\n"
                 "   * The tool will NOT automatically generate filenames or extensions\n\n"
                 "3. File Location After Conversion:\n"
                 "   * After successful conversion, the tool will display the exact path where the file is saved\n"
-                "   * Look for message: 'Content successfully converted and saved to: [file_path]'\n"
+                "   * Look for message: `Content successfully converted and saved to: [file_path]`\n"
                 "   * You can find your converted file at the specified location\n"
                 "   * If no path is specified, files may be saved in system temp directory (/tmp/ on Unix systems)\n"
                 "   * For better control, always provide explicit output file paths\n\n"
@@ -70,21 +77,21 @@ async def handle_list_tools() -> list[types.Tool]:
                 "- Advanced (REQUIRE complete file paths): pdf, docx, rst, latex, epub, odt, pptx\n"
                 "- pptx is WRITE-ONLY: it can be produced, but not used as an input format\n"
                 "✅ CORRECT Usage Examples:\n"
-                "1. 'Convert this text to HTML' (basic conversion)\n"
+                "1. `Convert this text to HTML` (basic conversion)\n"
                 "   - Tool will show converted content\n\n"
-                "2. 'Save this text as PDF at /documents/story.pdf'\n"
+                "2. `Save this text as PDF at /documents/story.pdf`\n"
                 "   - Correct: specifies path + filename + extension\n"
-                "   - Tool will show: 'Content successfully converted and saved to: /documents/story.pdf'\n\n"
+                "   - Tool will show: `Content successfully converted and saved to: /documents/story.pdf`\n\n"
                 "❌ INCORRECT Usage Examples:\n"
-                "1. 'Save this as PDF in /documents/'\n"
+                "1. `Save this as PDF in /documents/`\n"
                 "   - Missing filename and extension\n"
-                "2. 'Convert to PDF'\n"
+                "2. `Convert to PDF`\n"
                 "   - Missing complete file path\n\n"
                 "When requesting conversion, ALWAYS specify:\n"
                 "1. The content or input file\n"
                 "2. The desired output format\n"
                 "3. For advanced formats: complete output path + filename + extension\n"
-                "Example: 'Convert this markdown to PDF and save as /path/to/output.pdf'\n\n"
+                "Example: `Convert this markdown to PDF and save as /path/to/output.pdf`\n\n"
                 "🎨 DOCX, ODT & PPTX STYLING:\n"
                 "4. Custom Styling with Reference Documents:\n"
                 "   * Use reference_doc parameter to apply professional styling to DOCX, ODT and PPTX output\n"
@@ -92,15 +99,15 @@ async def handle_list_tools() -> list[types.Tool]:
                 "     .pptx for pptx\n"
                 "   * Create custom templates with your branding, fonts, and formatting\n"
                 "   * Perfect for corporate reports, academic papers, and professional documents\n"
-                "   * Example: 'Convert this report to DOCX using /templates/corporate-style.docx as reference "
-                "and save as /reports/Q4-report.docx'\n\n"
+                "   * Example: `Convert this report to DOCX using /templates/corporate-style.docx as reference "
+                "and save as /reports/Q4-report.docx`\n\n"
                 "🎯 PANDOC FILTERS (NEW FEATURE):\n"
                 "5. Pandoc Filter Support:\n"
                 "   * Use filters parameter to apply custom Pandoc filters during conversion\n"
                 "   * Filters are Python scripts that modify document content during processing\n"
                 "   * Perfect for Mermaid diagram conversion, custom styling, and content transformation\n"
-                "   * Example: 'Convert this markdown with mermaid diagrams to DOCX using "
-                "filters=[\"./filters/mermaid-to-png-vibrant.py\"] and save as /reports/diagram-report.docx'\n\n"
+                "   * Example: `Convert this markdown with mermaid diagrams to DOCX using "
+                "filters=[\"./filters/mermaid-to-png-vibrant.py\"] and save as /reports/diagram-report.docx`\n\n"
                 "📋 Creating Reference Documents:\n"
                 "   * Generate template: pandoc -o template.docx --print-default-data-file reference.docx\n"
                 "   * Customize in Word/LibreOffice: fonts, colors, headers, margins\n"
@@ -116,8 +123,8 @@ async def handle_list_tools() -> list[types.Tool]:
                 "   * Similar to using pandoc -d option in the command line\n"
                 "   * Allows setting multiple options in a single file\n"
                 "   * Options in the defaults file can include filters, reference-doc, and other Pandoc options\n"
-                "   * Example: 'Convert this markdown to DOCX using defaults_file=\"/path/to/defaults.yaml\" "
-                "and save as /reports/report.docx'\n\n"
+                "   * Example: `Convert this markdown to DOCX using defaults_file=\"/path/to/defaults.yaml\" "
+                "and save as /reports/report.docx`\n\n"
                 "Note: After conversion, always check the success message for the exact file location."
             ),
             input_schema={
@@ -131,7 +138,7 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": (
                             "Complete path to input file including filename and extension "
-                            "(e.g., '/path/to/input.md')"
+                            "(e.g., `/path/to/input.md`)"
                         )
                     },
                     "input_format": {
@@ -204,6 +211,12 @@ async def handle_call_tool(
     output_file = arguments.get("output_file")
     output_format = arguments.get("output_format", "markdown").lower()
     input_format = arguments.get("input_format", "markdown").lower()
+    logger.info(
+        "Converting %s to %s (%s)",
+        input_file or "inline contents",
+        output_file or "inline output",
+        f"{input_format} -> {output_format}",
+    )
     # The public MCP schema uses "txt"; Pandoc names the equivalent writer "plain".
     pandoc_output_format = "plain" if output_format == "txt" else output_format
     reference_doc = arguments.get("reference_doc")
@@ -510,6 +523,7 @@ async def handle_call_tool(
             f"{error_prefix} {'file' if input_file else 'contents'} from {input_format} to "
             f"{output_format}: {error_details}"
         )
+        logger.error(error_msg)
         raise ValueError(error_msg) from e
 
 
@@ -535,8 +549,10 @@ async def call_tool(
         return types.CallToolResult(content=content)
     except ValidationError as exc:
         message = f"Input validation error: {exc.message}"
+        logger.warning(message)
     except ValueError as exc:
         message = str(exc)
+        logger.warning(message)
 
     return types.CallToolResult(
         content=[types.TextContent(type="text", text=message)],
@@ -552,11 +568,41 @@ server = Server(
 )
 
 
+def create_sse_app() -> Starlette:
+    """Build the Starlette ASGI app that serves this MCP server over SSE."""
+    sse = SseServerTransport("/messages/")
+
+    async def handle_sse(request):
+        async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
+            await server.run(streams[0], streams[1], server.create_initialization_options())
+        # Return an (empty) response to avoid a "NoneType is not callable" error on disconnect.
+        return Response()
+
+    return Starlette(
+        routes=[
+            Route("/sse", endpoint=handle_sse, methods=["GET"]),
+            Mount("/messages/", app=sse.handle_post_message),
+        ],
+    )
+
+
 async def main():
-    """Run the mcp-pandoc server using stdin/stdout streams."""
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options(),
+    """Run the mcp-pandoc server using the transport configured via TRANSPORT."""
+    if settings.TRANSPORT == "sse":
+        logger.info("Starting mcp-pandoc server (transport=sse, host=%s, port=%s)", settings.HOST, settings.PORT)
+        uvicorn_config = uvicorn.Config(
+            create_sse_app(),
+            host=settings.HOST,
+            port=settings.PORT,
+            log_level=settings.LOG_LEVEL.lower(),
         )
+        await uvicorn.Server(uvicorn_config).serve()
+    else:
+        logger.info("Starting mcp-pandoc server (transport=stdio)")
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                server.create_initialization_options(),
+            )
+

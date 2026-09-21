@@ -1,0 +1,26 @@
+# IDE specific ignores
+.vscode
+# dependencies
+**/node_modules
+# tests
+**/coverage
+**/.qlty
+**/.scannerwork
+**/dependency-check-*.*
+**/tests
+**/docs
+**/demo
+**/examples
+# generic
+.DS_Store
+.dockerignore
+.editorconfig
+.secretignore
+.git
+.github
+.gitignore
+.sonarprops
+.env*
+Dockerfile
+Makefile
+

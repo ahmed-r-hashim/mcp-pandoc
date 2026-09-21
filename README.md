@@ -306,6 +306,81 @@ To use the published one
    - Note: Reference documents work with DOCX, ODT and PPTX output formats
    - How to create: `pandoc -o reference.docx --print-default-data-file reference.docx`, and likewise with `reference.odt` or `reference.pptx`
 
+## Running as a container (Podman/Docker Compose)
+
+Besides being spawned over stdio by a desktop MCP client, mcp-pandoc can run as a long-lived
+HTTP+SSE server using the bundled `Dockerfile` and `docker-compose.yml`. This is the setup to
+use when the server needs to be reachable over the network, or kept running independently of
+any single MCP client.
+
+```bash
+# Build the image and start the server, detached
+podman compose up -d --build
+
+# Follow logs
+podman compose logs -f pandoc-mcp-server
+
+# Stop and remove the container
+podman compose down
+```
+
+(`docker compose` works identically if you're using Docker instead of Podman.)
+
+By default the server listens on `http://localhost:8055` with the MCP endpoint at `/sse`.
+`docker-compose.yml` mounts the local `./data` directory to `/app/data` inside the container,
+so when calling `convert-contents` against the containerized server, use container-side paths
+under `/app/data/...` for `input_file`/`output_file` - converted files then show up back in
+`./data` on the host.
+
+Transport and networking are configured via environment variables (set them in a `.env` file
+next to `docker-compose.yml`, which is loaded via `env_file`):
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PANDOC_MCP_TRANSPORT` | `sse` | `sse` for HTTP+SSE (used by the container), or `stdio` |
+| `PANDOC_MCP_HOST` | `0.0.0.0` | Host/interface the SSE server binds to |
+| `PANDOC_MCP_PORT` | `8055` | Port the SSE server binds to |
+| `PANDOC_MCP_LOG_LEVEL` | `INFO` | Logging level |
+
+### Container image architecture
+
+The `Dockerfile` is a three-stage build:
+
+- **`base`** - installs the OS-level conversion engine (`pandoc`, `texlive-xetex` and the LaTeX
+  packages needed for PDF output) and creates the non-root `app` user. Both other stages build
+  on top of this, so those dependencies are declared once.
+- **`builder`** - extends `base`, installs [`uv`](https://docs.astral.sh/uv/) and syncs the
+  locked Python dependencies into a venv at `/app/.venv`.
+- **`runtime`** - also extends `base` directly (not `builder`), and only copies the compiled
+  `/app` (venv + source) from the `builder` stage. This keeps the final image free of `uv` and
+  any build-only tooling while still sharing the same pinned `pandoc`/TeX Live layer as the
+  build stage.
+
+### Connecting an MCP client to the SSE server
+
+Once the container is running, point an MCP client at the SSE endpoint instead of having it
+spawn the server as a subprocess:
+
+```json
+"mcp-pandoc": {
+    "type": "sse",
+    "url": "http://localhost:8055/sse"
+},
+```
+
+For example, as an entry in VS Code's `mcp.json`:
+
+```json
+{
+  "servers": {
+    "mcp-pandoc": {
+      "type": "sse",
+      "url": "http://localhost:8055/sse"
+    }
+  }
+}
+```
+
 ## Quickstart
 
 <!-- Uncomment after smithery fix
